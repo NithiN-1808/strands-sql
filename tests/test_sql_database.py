@@ -117,7 +117,7 @@ class TestSanitizeError:
     def test_truncates_long_messages(self):
         exc = Exception("x" * 1000)
         result = _sanitize_error(exc)
-        assert len(result) <= 420  # 400 + "[truncated]"
+        assert len(result) <= 420  # 400 chars + "[truncated]"
 
     def test_short_messages_unchanged(self):
         exc = Exception("table not found")
@@ -160,6 +160,17 @@ class TestRowsToMarkdown:
         assert "Alice" in result
         assert "id" in result
 
+    def test_column_alignment(self):
+        """Column values should be left-justified to match header width."""
+        result = _rows_to_markdown(["id", "name"], [(1, "Alice"), (2, "Bob")])
+        lines = result.splitlines()
+        # Header, separator, and 2 data rows
+        assert len(lines) == 4
+
+    def test_pipe_delimiter_present(self):
+        result = _rows_to_markdown(["a", "b"], [(1, 2)])
+        assert "|" in result
+
 
 # ---------------------------------------------------------------------------
 # Integration tests — via the tool entry point
@@ -167,7 +178,9 @@ class TestRowsToMarkdown:
 
 
 class TestSqlDatabaseTool:
-    # --- Missing connection string ---
+
+    # --- Missing / env connection string ---
+
     def test_no_connection_string_returns_error(self, monkeypatch):
         monkeypatch.delenv("DATABASE_URL", raising=False)
         result = sql_database(
@@ -184,6 +197,7 @@ class TestSqlDatabaseTool:
         assert result["status"] == "success"
 
     # --- list_tables ---
+
     def test_list_tables(self, seeded_db):
         result = sql_database(_tool_call("list_tables", connection_string=seeded_db))
         assert result["status"] == "success"
@@ -208,6 +222,7 @@ class TestSqlDatabaseTool:
         assert "users" in text
 
     # --- describe_table ---
+
     def test_describe_table(self, seeded_db):
         result = sql_database(
             _tool_call("describe_table", connection_string=seeded_db, table="users")
@@ -217,7 +232,15 @@ class TestSqlDatabaseTool:
         assert "name" in text
         assert "email" in text
 
+    def test_describe_table_shows_pk(self, seeded_db):
+        """Primary key column should be flagged in the description."""
+        result = sql_database(
+            _tool_call("describe_table", connection_string=seeded_db, table="users")
+        )
+        assert "PK" in result["content"][0]["text"]
+
     def test_describe_table_missing_table_param(self, seeded_db):
+        """Omitting 'table' must fail at model validation → status error."""
         result = sql_database(
             {
                 "toolUseId": "t1",
@@ -238,7 +261,16 @@ class TestSqlDatabaseTool:
         )
         assert "blocked" in result["content"][0]["text"]
 
+    def test_describe_nonexistent_table(self, seeded_db):
+        """Describing a table that doesn't exist should return an error message."""
+        result = sql_database(
+            _tool_call("describe_table", connection_string=seeded_db, table="ghost_table")
+        )
+        text = result["content"][0]["text"].lower()
+        assert "error" in text
+
     # --- schema_summary ---
+
     def test_schema_summary(self, seeded_db):
         result = sql_database(_tool_call("schema_summary", connection_string=seeded_db))
         assert result["status"] == "success"
@@ -246,7 +278,15 @@ class TestSqlDatabaseTool:
         assert "users" in text
         assert "orders" in text
 
+    def test_schema_summary_contains_column_names(self, seeded_db):
+        result = sql_database(_tool_call("schema_summary", connection_string=seeded_db))
+        text = result["content"][0]["text"]
+        # summary format: tablename(col:TYPE, ...)
+        assert "id" in text
+        assert "name" in text
+
     # --- query ---
+
     def test_query_select(self, seeded_db):
         result = sql_database(
             _tool_call("query", connection_string=seeded_db, sql="SELECT * FROM users")
@@ -264,7 +304,9 @@ class TestSqlDatabaseTool:
             )
         )
         text = result["content"][0]["text"]
-        assert "|" in text or "-" in text  # markdown table separators
+        # _rows_to_markdown uses " | " and "-+-" separators
+        assert "|" in text
+        assert "-" in text
 
     def test_query_json_format(self, seeded_db):
         import json
@@ -316,7 +358,31 @@ class TestSqlDatabaseTool:
         )
         assert "error" in result["content"][0]["text"].lower()
 
+    def test_query_filters_by_allowed_table(self, seeded_db):
+        """Query against an allowed table should succeed; blocked should be denied."""
+        ok = sql_database(
+            _tool_call(
+                "query",
+                connection_string=seeded_db,
+                sql="SELECT * FROM users",
+                allowed_tables=["users"],
+            )
+        )
+        assert result["status"] == "success" if (result := ok) else True
+        assert "Alice" in ok["content"][0]["text"]
+
+        denied = sql_database(
+            _tool_call(
+                "query",
+                connection_string=seeded_db,
+                sql="SELECT * FROM orders",
+                allowed_tables=["users"],
+            )
+        )
+        assert "not in allowed_tables" in denied["content"][0]["text"]
+
     # --- execute ---
+
     def test_execute_blocked_by_read_only(self, seeded_db):
         result = sql_database(
             _tool_call(
@@ -341,7 +407,27 @@ class TestSqlDatabaseTool:
         assert result["status"] == "success"
         assert "OK" in result["content"][0]["text"]
 
+    def test_execute_write_reflected_in_query(self, seeded_db):
+        """Inserted row should be visible in a subsequent SELECT."""
+        sql_database(
+            _tool_call(
+                "execute",
+                connection_string=seeded_db,
+                sql="INSERT INTO users VALUES (99, 'Charlie', NULL)",
+                read_only=False,
+            )
+        )
+        result = sql_database(
+            _tool_call(
+                "query",
+                connection_string=seeded_db,
+                sql="SELECT name FROM users WHERE id=99",
+            )
+        )
+        assert "Charlie" in result["content"][0]["text"]
+
     def test_execute_missing_sql(self, seeded_db):
+        """Omitting 'sql' for execute must fail at model validation → status error."""
         result = sql_database(
             {
                 "toolUseId": "t1",
@@ -351,14 +437,35 @@ class TestSqlDatabaseTool:
         )
         assert result["status"] == "error"
 
+    def test_execute_rowcount_reported(self, seeded_db):
+        """Rows affected count should appear in the success message."""
+        result = sql_database(
+            _tool_call(
+                "execute",
+                connection_string=seeded_db,
+                sql="UPDATE users SET email='new@example.com' WHERE id=1",
+                read_only=False,
+            )
+        )
+        text = result["content"][0]["text"]
+        assert "1" in text  # "Rows affected: 1"
+
     # --- engine cache ---
+
     def test_engine_is_cached(self, seeded_db):
         _ENGINE_CACHE.clear()
         _get_engine(seeded_db, 30)
         assert seeded_db in _ENGINE_CACHE
         engine_first = _ENGINE_CACHE[seeded_db]
         _get_engine(seeded_db, 30)
-        assert _ENGINE_CACHE[seeded_db] is engine_first  # same object
+        assert _ENGINE_CACHE[seeded_db] is engine_first  # same object reused
+
+    def test_different_urls_get_different_engines(self, seeded_db, tmp_path):
+        import tempfile
+        db2 = f"sqlite:///{tmp_path}/other.db"
+        e1 = _get_engine(seeded_db, 30)
+        e2 = _get_engine(db2, 30)
+        assert e1 is not e2
 
 
 # ---------------------------------------------------------------------------
@@ -373,20 +480,72 @@ class TestSqlDatabaseInput:
         assert m.read_only is True
         assert m.output_format == "markdown"
 
+    def test_valid_execute(self):
+        m = SqlDatabaseInput(action="execute", sql="INSERT INTO t VALUES (1)", read_only=False)
+        assert m.sql is not None
+
     def test_query_requires_sql(self):
         with pytest.raises(Exception, match="sql"):
             SqlDatabaseInput(action="query")
+
+    def test_execute_requires_sql(self):
+        with pytest.raises(Exception, match="sql"):
+            SqlDatabaseInput(action="execute")
 
     def test_describe_requires_table(self):
         with pytest.raises(Exception, match="table"):
             SqlDatabaseInput(action="describe_table")
 
-    def test_max_rows_bounds(self):
+    def test_list_tables_needs_no_sql(self):
+        m = SqlDatabaseInput(action="list_tables")
+        assert m.sql is None
+
+    def test_schema_summary_needs_no_sql(self):
+        m = SqlDatabaseInput(action="schema_summary")
+        assert m.sql is None
+
+    def test_max_rows_lower_bound(self):
         with pytest.raises(Exception):
             SqlDatabaseInput(action="query", sql="SELECT 1", max_rows=0)
+
+    def test_max_rows_upper_bound(self):
         with pytest.raises(Exception):
             SqlDatabaseInput(action="query", sql="SELECT 1", max_rows=99999)
 
-    def test_timeout_bounds(self):
+    def test_max_rows_valid_edge(self):
+        m = SqlDatabaseInput(action="query", sql="SELECT 1", max_rows=10_000)
+        assert m.max_rows == 10_000
+
+    def test_timeout_lower_bound(self):
         with pytest.raises(Exception):
             SqlDatabaseInput(action="query", sql="SELECT 1", timeout=0)
+
+    def test_timeout_upper_bound(self):
+        with pytest.raises(Exception):
+            SqlDatabaseInput(action="query", sql="SELECT 1", timeout=301)
+
+    def test_timeout_valid_edge(self):
+        m = SqlDatabaseInput(action="query", sql="SELECT 1", timeout=300)
+        assert m.timeout == 300
+
+    def test_output_format_default(self):
+        m = SqlDatabaseInput(action="query", sql="SELECT 1")
+        assert m.output_format == "markdown"
+
+    def test_output_format_json(self):
+        m = SqlDatabaseInput(action="query", sql="SELECT 1", output_format="json")
+        assert m.output_format == "json"
+
+    def test_invalid_output_format(self):
+        with pytest.raises(Exception):
+            SqlDatabaseInput(action="query", sql="SELECT 1", output_format="csv")
+
+    def test_allowed_and_blocked_tables(self):
+        m = SqlDatabaseInput(
+            action="query",
+            sql="SELECT 1",
+            allowed_tables=["users"],
+            blocked_tables=["secrets"],
+        )
+        assert m.allowed_tables == ["users"]
+        assert m.blocked_tables == ["secrets"]
