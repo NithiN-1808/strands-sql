@@ -1,5 +1,4 @@
 # strands-sql
-
 [![PyPI](https://img.shields.io/pypi/v/strands-sql)](https://pypi.org/project/strands-sql/)
 [![Python](https://img.shields.io/pypi/pyversions/strands-sql)](https://pypi.org/project/strands-sql/)
 
@@ -20,23 +19,44 @@ pip install "strands-sql[mysql]"
 
 ## Quick Start
 
+### Direct Usage
+
+```python
+from strands_sql import run_sql_database
+
+# Discover the schema
+run_sql_database(
+    action="schema_summary",
+    connection_string="sqlite:///./local.db"
+)
+
+# Describe a specific table
+run_sql_database(
+    action="describe_table",
+    table="users",
+    connection_string="sqlite:///./local.db"
+)
+
+# Run a query (returns a markdown table by default)
+run_sql_database(
+    action="query",
+    sql="SELECT * FROM orders WHERE amount > 100 LIMIT 20",
+    connection_string="sqlite:///./local.db"
+)
+```
+
+### With a Strands Agent
+
 ```python
 from strands import Agent
 from strands_sql import sql_database
 
 agent = Agent(tools=[sql_database])
 
-# Discover the schema
-agent.tool.sql_database(action="schema_summary")
-
-# Describe a specific table
-agent.tool.sql_database(action="describe_table", table="users")
-
-# Run a query (returns a markdown table by default)
-agent.tool.sql_database(
-    action="query",
-    sql="SELECT * FROM orders WHERE amount > 100 LIMIT 20",
-)
+# The agent decides when and how to invoke the tool
+agent("List all tables in my database")
+agent("Show me all orders above 100")
+agent("How many users are there?")
 ```
 
 ## Configuration
@@ -50,7 +70,7 @@ export DATABASE_URL="postgresql://user:password@localhost:5432/mydb"
 ```
 
 ```python
-agent.tool.sql_database(
+run_sql_database(
     action="list_tables",
     connection_string="sqlite:///./local.db",
 )
@@ -69,9 +89,10 @@ agent.tool.sql_database(
 ## Safety Options
 
 ```python
-agent.tool.sql_database(
+run_sql_database(
     action="query",
     sql="SELECT * FROM users",
+    connection_string="sqlite:///./local.db",
     read_only=True,                      # Default: True — blocks INSERT/UPDATE/DELETE
     max_rows=500,                        # Default: 500 — caps result size
     timeout=30,                          # Default: 30s — kills hung queries
@@ -85,6 +106,7 @@ agent.tool.sql_database(
 | `read_only` | `True` | Blocks all write queries |
 | `max_rows` | `500` | Maximum rows returned by `query` |
 | `timeout` | `30` | Query timeout in seconds (1–300) |
+| `output_format` | `markdown` | Output format: `markdown` or `json` |
 | `allowed_tables` | `None` | Allowlist — only these tables are accessible |
 | `blocked_tables` | `None` | Blocklist — these tables are never accessible |
 
@@ -92,10 +114,33 @@ agent.tool.sql_database(
 
 ```python
 # Markdown table (default — great for LLMs)
-agent.tool.sql_database(action="query", sql="SELECT * FROM users", output_format="markdown")
+run_sql_database(
+    action="query",
+    sql="SELECT * FROM users",
+    connection_string="sqlite:///./local.db",
+    output_format="markdown"
+)
 
 # JSON array
-agent.tool.sql_database(action="query", sql="SELECT * FROM users", output_format="json")
+run_sql_database(
+    action="query",
+    sql="SELECT * FROM users",
+    connection_string="sqlite:///./local.db",
+    output_format="json"
+)
+```
+
+## Execute (Write Queries)
+
+Write queries are blocked by default. To enable:
+
+```python
+run_sql_database(
+    action="execute",
+    sql="INSERT INTO users (name, age) VALUES ('Eve', 22)",
+    connection_string="sqlite:///./local.db",
+    read_only=False
+)
 ```
 
 ## Development

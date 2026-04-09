@@ -1,5 +1,5 @@
 """strands-sql — General-purpose SQL tool for Strands agents."""
 
-from .sql_database import TOOL_SPEC, sql_database
+from .sql_database import sql_database, get_tool, run_sql_database
 
-__all__ = ["sql_database", "TOOL_SPEC"]
+__all__ = ["sql_database", "get_tool", "run_sql_database"]

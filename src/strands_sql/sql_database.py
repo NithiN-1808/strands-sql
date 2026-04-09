@@ -480,3 +480,25 @@ def sql_database(tool: ToolUse, **kwargs: Any) -> ToolResult:
     }
 sql_database.TOOL_SPEC = TOOL_SPEC # type: ignore[attr-defined]
 sql_database.tool_spec = TOOL_SPEC  # type: ignore[attr-defined]
+
+def get_tool():
+    """Return a properly registered Strands Tool."""
+    from strands.tools import Tool
+
+    return Tool.from_function(
+        func=sql_database,
+        name=TOOL_SPEC["name"],
+        description=TOOL_SPEC["description"],
+        input_schema=TOOL_SPEC["inputSchema"]["json"],
+    )
+
+
+def run_sql_database(**kwargs):
+    """Direct usage without needing ToolUse format."""
+    result = sql_database(
+        tool={
+            "toolUseId": "direct",
+            "input": kwargs,
+        }
+    )
+    return result["content"][0]["text"]
