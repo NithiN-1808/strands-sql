@@ -461,7 +461,6 @@ class TestSqlDatabaseTool:
         assert _ENGINE_CACHE[seeded_db] is engine_first  # same object reused
 
     def test_different_urls_get_different_engines(self, seeded_db, tmp_path):
-        import tempfile
         db2 = f"sqlite:///{tmp_path}/other.db"
         e1 = _get_engine(seeded_db, 30)
         e2 = _get_engine(db2, 30)
