@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "strands-sql"
-version = "0.1.5"
+version = "0.1.6"
 description = "General-purpose SQL tool for Strands agents — supports PostgreSQL, MySQL, and SQLite."
 readme = "README.md"
 license = { file = "LICENSE" }
