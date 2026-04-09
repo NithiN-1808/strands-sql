@@ -478,4 +478,4 @@ def sql_database(tool: ToolUse, **kwargs: Any) -> ToolResult:
         "status": "success",
         "content": [{"text": result}],
     }
-sql_database.TOOL_SPEC = TOOL_SPEC
+sql_database.TOOL_SPEC = TOOL_SPEC # type: ignore[attr-defined]
