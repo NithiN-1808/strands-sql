@@ -49,15 +49,18 @@ run_sql_database(
 
 ```python
 from strands import Agent
-from strands_sql import sql_database
+from strands_sql import get_tool
 
-agent = Agent(tools=[sql_database])
+agent = Agent(tools=[get_tool()])
 
 # The agent decides when and how to invoke the tool
 agent("List all tables in my database")
 agent("Show me all orders above 100")
 agent("How many users are there?")
 ```
+
+> ⚠️ **Note**  
+> Use `get_tool()` to properly register the tool with Strands. Passing `sql_database` directly will raise a `Tool 'sql_database' not found` error.
 
 ## Configuration
 
