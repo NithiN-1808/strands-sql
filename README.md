@@ -1,18 +1,21 @@
-# strands-tools-sql
+# strands-sql
 
-A general-purpose SQL tool for [Strands Agents](https://strandsagents.com) — supporting PostgreSQL, MySQL, and SQLite via SQLAlchemy.
+[![PyPI](https://img.shields.io/pypi/v/strands-sql)](https://pypi.org/project/strands-sql/)
+[![Python](https://img.shields.io/pypi/pyversions/strands-sql)](https://pypi.org/project/strands-sql/)
+
+A general-purpose SQL tool for [Strands Agents](https://strandsagents.com) — supports PostgreSQL, MySQL, and SQLite via SQLAlchemy.
 
 ## Installation
 
 ```bash
 # SQLite (no extra driver needed)
-pip install strands-tools-sql
+pip install strands-sql
 
 # PostgreSQL
-pip install "strands-tools-sql[postgres]"
+pip install "strands-sql[postgres]"
 
 # MySQL
-pip install "strands-tools-sql[mysql]"
+pip install "strands-sql[mysql]"
 ```
 
 ## Quick Start
@@ -32,7 +35,7 @@ agent.tool.sql_database(action="describe_table", table="users")
 # Run a query (returns a markdown table by default)
 agent.tool.sql_database(
     action="query",
-    sql="SELECT * FROM orders WHERE amount > 100 LIMIT 20"
+    sql="SELECT * FROM orders WHERE amount > 100 LIMIT 20",
 )
 ```
 
@@ -49,7 +52,7 @@ export DATABASE_URL="postgresql://user:password@localhost:5432/mydb"
 ```python
 agent.tool.sql_database(
     action="list_tables",
-    connection_string="sqlite:///./local.db"
+    connection_string="sqlite:///./local.db",
 )
 ```
 
@@ -69,9 +72,9 @@ agent.tool.sql_database(
 agent.tool.sql_database(
     action="query",
     sql="SELECT * FROM users",
-    read_only=True,          # Default: True — blocks INSERT/UPDATE/DELETE
-    max_rows=500,            # Default: 500 — caps result size
-    timeout=30,              # Default: 30s — kills hung queries
+    read_only=True,                      # Default: True — blocks INSERT/UPDATE/DELETE
+    max_rows=500,                        # Default: 500 — caps result size
+    timeout=30,                          # Default: 30s — kills hung queries
     allowed_tables=["users", "orders"],  # Allowlist
     blocked_tables=["secrets"],          # Blocklist
 )
@@ -98,8 +101,8 @@ agent.tool.sql_database(action="query", sql="SELECT * FROM users", output_format
 ## Development
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/strands-tools-sql
-cd strands-tools-sql
+git clone https://github.com/NithiN-1808/strands-sql
+cd strands-sql
 pip install -e ".[dev]"
 
 # Run tests
