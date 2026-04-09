@@ -114,7 +114,7 @@ def select_components() -> list[str]:
 
 def replace_in_file(filepath: str, replacements: dict[str, str]) -> None:
     """Replace all occurrences in a file."""
-    with open(filepath, "r", encoding="utf-8") as f:
+    with open(filepath, encoding="utf-8") as f:
         content = f.read()
 
     for old, new in replacements.items():
