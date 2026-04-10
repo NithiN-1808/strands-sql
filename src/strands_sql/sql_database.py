@@ -15,7 +15,8 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
 from strands.types.tools import ToolResult, ToolUse
-
+import sqlglot
+from sqlglot import exp
 from .models import SqlDatabaseInput
 
 # ---------------------------------------------------------------------------
@@ -29,8 +30,8 @@ def _get_engine(connection_string: str, timeout: int) -> Engine:
     if key not in _ENGINE_CACHE:
         _ENGINE_CACHE[key] = create_engine(
             connection_string,
-            poolclass=NullPool,  # safe default; no dangling connections
-            pool_pre_ping=True,  # detect stale connections before use
+            poolclass=NullPool,
+            pool_pre_ping=True,
             connect_args=_timeout_args(connection_string, timeout),
         )
     return _ENGINE_CACHE[key]
@@ -43,7 +44,6 @@ def _timeout_args(connection_string: str, timeout: int) -> dict:
         return {"connect_timeout": timeout, "options": f"-c statement_timeout={timeout * 1000}"}
     if cs.startswith("mysql"):
         return {"connect_timeout": timeout, "read_timeout": timeout, "write_timeout": timeout}
-    # SQLite and others — no timeout args
     return {}
 
 
@@ -58,19 +58,33 @@ _COMMENT_PATTERN = re.compile(r"(--[^\n]*|/\*.*?\*/)", re.DOTALL)
 
 
 def _is_write_query(sql: str) -> bool:
-    clean = _COMMENT_PATTERN.sub("", sql)
-    return bool(_WRITE_PATTERN.match(clean.strip()))
+    # Strip line comments and block comments before checking
+    cleaned = re.sub(r"--[^\n]*", "", sql)
+    cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL)
+    cleaned = cleaned.strip()
+    return bool(
+        re.match(
+            r"(insert|update|delete|drop|create|alter|truncate|replace|merge|call|exec)\b",
+            cleaned,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _sanitize_error(exc: Exception) -> str:
     """Return a safe error message that doesn't leak internal stack details."""
     msg = str(exc)
-    # Strip file paths and line references
     msg = re.sub(r'File ".*?"', 'File "<hidden>"', msg)
-    # Truncate very long messages (e.g. full query echoed back by driver)
     if len(msg) > 400:
         msg = msg[:400] + "... [truncated]"
     return msg
+
+def _extract_tables(sql: str) -> set[str]:
+    try:
+        parsed = sqlglot.parse_one(sql)
+        return {table.name for table in parsed.find_all(exp.Table)}
+    except Exception:
+        return set()
 
 
 def _check_table_access(
@@ -78,8 +92,7 @@ def _check_table_access(
     allowed_tables: list[str] | None,
     blocked_tables: list[str] | None,
 ) -> str | None:
-    """Return an error string if table access is denied, else None."""
-    if allowed_tables and table.lower() not in [t.lower() for t in allowed_tables]:
+    if allowed_tables is not None and table.lower() not in [t.lower() for t in allowed_tables]:
         return f"Access denied: table '{table}' is not in allowed_tables."
     if blocked_tables and table.lower() in [t.lower() for t in blocked_tables]:
         return f"Access denied: table '{table}' is blocked."
@@ -91,22 +104,22 @@ def _check_sql_table_access(
     allowed_tables: list[str] | None,
     blocked_tables: list[str] | None,
 ) -> str | None:
-    """Best-effort check that a SQL query only touches allowed tables."""
     if not allowed_tables and not blocked_tables:
         return None
-    # Extract identifiers after FROM / JOIN — naive but catches the common case
-    identifiers = re.findall(r"(?:from|join)\s+[`\"]?(\w+)[`\"]?", sql, re.IGNORECASE)
-    for tbl in identifiers:
+
+    tables = _extract_tables(sql)
+
+    for tbl in tables:
         err = _check_table_access(tbl, allowed_tables, blocked_tables)
         if err:
             return err
+
     return None
 
 
 # ---------------------------------------------------------------------------
 # Output formatting
 # ---------------------------------------------------------------------------
-
 
 def _rows_to_markdown(columns: list[str], rows: list[tuple[Any, ...]]) -> str:
     if not rows:
@@ -132,17 +145,14 @@ def _format_results(
     note = f"\n\n⚠️  Results truncated to {max_rows} rows." if truncated else ""
     if output_format == "markdown":
         return _rows_to_markdown(columns, rows) + note
-    # Default: JSON-like
-    result = [dict(zip(columns, row)) for row in rows]
     import json
-
+    result = [dict(zip(columns, row)) for row in rows]
     return json.dumps(result, default=str, indent=2) + note
 
 
 # ---------------------------------------------------------------------------
-# Action implementations
+# Action implementations (internal)
 # ---------------------------------------------------------------------------
-
 
 def _list_tables(
     engine: Engine,
@@ -164,8 +174,7 @@ def _list_tables(
 
     if not filtered:
         return "No accessible tables or views found."
-    lines = [f"[{kind}] {name}" for kind, name in filtered]
-    return "\n".join(lines)
+    return "\n".join(f"[{kind}] {name}" for kind, name in filtered)
 
 
 def _describe_table(
@@ -218,7 +227,6 @@ def _schema_summary(
     inspector = inspect(engine)
     all_tables = inspector.get_table_names()
 
-    # Apply access filters
     visible = []
     for t in all_tables:
         if allowed_tables and t.lower() not in [x.lower() for x in allowed_tables]:
@@ -264,6 +272,7 @@ def _run_query(
         return err
 
     try:
+        sql = sql.strip()
         with engine.connect() as conn:
             result = conn.execute(text(sql).execution_options(timeout=timeout))
             columns = list(result.keys())
@@ -296,7 +305,203 @@ def _run_execute(
 
 
 # ---------------------------------------------------------------------------
-# Tool entry point — called by the Strands agent runtime
+# StrandsSQL — the primary public API
+# ---------------------------------------------------------------------------
+
+class StrandsSQL:
+    """
+    A clean, class-based interface to the strands-sql tool.
+
+    Set the connection once; call methods directly or pass to a Strands agent.
+
+    Example::
+
+        db = StrandsSQL("sqlite:///./local.db")
+
+        # Direct usage
+        print(db.list_tables())
+        print(db.query("SELECT * FROM users"))
+
+        # Agent usage
+        from strands import Agent
+        agent = Agent(tools=[db.as_tool()])
+        agent("How many users are there?")
+    """
+
+    def __init__(
+        self,
+        connection_string: str | None = None,
+        *,
+        read_only: bool = True,
+        max_rows: int = 500,
+        timeout: int = 30,
+        output_format: str = "markdown",
+        allowed_tables: list[str] | None = None,
+        blocked_tables: list[str] | None = None,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        connection_string:
+            SQLAlchemy URL (e.g. ``"sqlite:///./local.db"``).
+            Falls back to the ``DATABASE_URL`` environment variable.
+        read_only:
+            Block all write queries when ``True`` (default).
+        max_rows:
+            Maximum rows returned by :meth:`query`. Default 500.
+        timeout:
+            Query timeout in seconds (1–300). Default 30.
+        output_format:
+            ``"markdown"`` (default) or ``"json"``.
+        allowed_tables:
+            Allowlist — only these tables are accessible.
+        blocked_tables:
+            Blocklist — these tables are never accessible.
+        """
+        self._connection_string = connection_string or os.environ.get("DATABASE_URL")
+        if not self._connection_string:
+            raise ValueError(
+                "No connection string provided. "
+                "Pass one to StrandsSQL() or set the DATABASE_URL environment variable."
+            )
+        self.read_only = read_only
+        self.max_rows = max_rows
+        self.timeout = timeout
+        self.output_format = output_format
+        self.allowed_tables = allowed_tables
+        self.blocked_tables = blocked_tables
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def _engine(self) -> Engine:
+        return _get_engine(self._connection_string, self.timeout)
+
+    def _defaults(self, **overrides) -> dict:
+        """Merge instance defaults with per-call overrides."""
+        base = dict(
+            connection_string=self._connection_string,
+            read_only=self.read_only,
+            max_rows=self.max_rows,
+            timeout=self.timeout,
+            output_format=self.output_format,
+            allowed_tables=self.allowed_tables,
+            blocked_tables=self.blocked_tables,
+        )
+        base.update({k: v for k, v in overrides.items() if v is not None})
+        return base
+
+    # ------------------------------------------------------------------
+    # Public methods
+    # ------------------------------------------------------------------
+
+    def list_tables(self) -> str:
+        """List all accessible tables and views."""
+        return _list_tables(self._engine, self.allowed_tables, self.blocked_tables)
+
+    def describe_table(self, table: str) -> str:
+        """Describe columns, types, primary keys, and foreign keys for *table*."""
+        return _describe_table(self._engine, table, self.allowed_tables, self.blocked_tables)
+
+    def schema_summary(self) -> str:
+        """Return a compact schema of all accessible tables — ideal as LLM context."""
+        return _schema_summary(self._engine, self.allowed_tables, self.blocked_tables)
+
+    def query(
+        self,
+        sql: str,
+        *,
+        output_format: str | None = None,
+        max_rows: int | None = None,
+    ) -> str:
+        """
+        Run a SELECT statement and return results.
+
+        Parameters
+        ----------
+        sql:
+            A SELECT query.
+        output_format:
+            Override the instance default (``"markdown"`` or ``"json"``).
+        max_rows:
+            Override the instance default row cap.
+        """
+        if self.read_only and _is_write_query(sql):
+            return (
+                "Write statement detected in read_only mode. "
+                "Use execute() with read_only=False."
+            )
+        return _run_query(
+            self._engine,
+            sql,
+            self.allowed_tables,
+            self.blocked_tables,
+            max_rows if max_rows is not None else self.max_rows,
+            output_format if output_format is not None else self.output_format,
+            self.timeout,
+        )
+
+    def execute(self, sql: str) -> str:
+        """
+        Run a write statement (INSERT / UPDATE / DELETE / DDL).
+
+        Raises ``PermissionError`` if the instance was created with ``read_only=True``.
+        """
+        if self.read_only:
+            raise PermissionError(
+                "Write queries are blocked. Create StrandsSQL with read_only=False to enable."
+            )
+        return _run_execute(
+            self._engine,
+            sql,
+            self.allowed_tables,
+            self.blocked_tables,
+            self.timeout,
+        )
+
+    def as_tool(self):
+        """
+        Return a Strands-compatible Tool bound to this instance's connection and settings.
+
+        Example::
+
+            from strands import Agent
+            db = StrandsSQL("sqlite:///./local.db")
+            agent = Agent(tools=[db.as_tool()])
+            agent("List all tables")
+        """
+        from strands.tools import Tool
+
+        instance = self  # capture for closure
+
+        def _bound_sql_database(tool: ToolUse, **kwargs: Any) -> ToolResult:
+            tool_input = dict(tool.get("input", {}))
+            # Inject instance-level defaults so the agent never needs to supply them
+            tool_input.setdefault("connection_string", instance._connection_string)
+            tool_input.setdefault("read_only", instance.read_only)
+            tool_input.setdefault("max_rows", instance.max_rows)
+            tool_input.setdefault("timeout", instance.timeout)
+            tool_input.setdefault("output_format", instance.output_format)
+            if instance.allowed_tables is not None:
+                tool_input.setdefault("allowed_tables", instance.allowed_tables)
+            if instance.blocked_tables is not None:
+                tool_input.setdefault("blocked_tables", instance.blocked_tables)
+            modified_tool = dict(tool)
+            modified_tool["input"] = tool_input
+            return sql_database(modified_tool, **kwargs)
+
+        return Tool.from_function(
+            func=_bound_sql_database,
+            name=TOOL_SPEC["name"],
+            description=TOOL_SPEC["description"],
+            input_schema=TOOL_SPEC["inputSchema"]["json"],
+        )
+
+
+# ---------------------------------------------------------------------------
+# TOOL_SPEC + low-level tool handler (used by StrandsSQL.as_tool and get_tool)
 # ---------------------------------------------------------------------------
 
 TOOL_SPEC = {
@@ -325,9 +530,7 @@ TOOL_SPEC = {
                 },
                 "connection_string": {
                     "type": "string",
-                    "description": (
-                        "SQLAlchemy connection string. Falls back to DATABASE_URL env var."
-                    ),
+                    "description": "SQLAlchemy connection string. Falls back to DATABASE_URL env var.",
                 },
                 "read_only": {
                     "type": "boolean",
@@ -364,10 +567,9 @@ TOOL_SPEC = {
 
 
 def sql_database(tool: ToolUse, **kwargs: Any) -> ToolResult:
-    """Strands tool handler for sql_database."""
+    """Low-level Strands tool handler. Prefer StrandsSQL for direct usage."""
     tool_input = tool.get("input", {})
 
-    # Parse and validate input
     try:
         params = SqlDatabaseInput(**tool_input)
     except Exception as exc:
@@ -377,29 +579,21 @@ def sql_database(tool: ToolUse, **kwargs: Any) -> ToolResult:
             "content": [{"text": f"Invalid input: {exc}"}],
         }
 
-    # Resolve connection string
     connection_string = params.connection_string or os.environ.get("DATABASE_URL")
     if not connection_string:
         return {
             "toolUseId": tool["toolUseId"],
             "status": "error",
             "content": [
-                {
-                    "text": (
-                        "No connection string provided. Set DATABASE_URL or pass connection_string."
-                    )
-                }
+                {"text": "No connection string provided. Set DATABASE_URL or pass connection_string."}
             ],
         }
 
-    # Safety: block writes when read_only=True
     if params.read_only and params.action == "execute":
         return {
             "toolUseId": tool["toolUseId"],
             "status": "error",
-            "content": [
-                {"text": "Write queries are blocked. Set read_only=False to enable execute."}
-            ],
+            "content": [{"text": "Write queries are blocked. Set read_only=False to enable execute."}],
         }
 
     if params.read_only and params.action == "query" and params.sql and _is_write_query(params.sql):
@@ -416,7 +610,6 @@ def sql_database(tool: ToolUse, **kwargs: Any) -> ToolResult:
             ],
         }
 
-    # Get (or create) engine
     try:
         engine = _get_engine(connection_string, params.timeout)
     except Exception as exc:
@@ -426,7 +619,6 @@ def sql_database(tool: ToolUse, **kwargs: Any) -> ToolResult:
             "content": [{"text": f"Connection failed: {_sanitize_error(exc)}"}],
         }
 
-    # Dispatch
     try:
         if params.action == "list_tables":
             result = _list_tables(engine, params.allowed_tables, params.blocked_tables)
@@ -478,11 +670,14 @@ def sql_database(tool: ToolUse, **kwargs: Any) -> ToolResult:
         "status": "success",
         "content": [{"text": result}],
     }
-sql_database.TOOL_SPEC = TOOL_SPEC # type: ignore[attr-defined]
+
+
+sql_database.TOOL_SPEC = TOOL_SPEC  # type: ignore[attr-defined]
 sql_database.tool_spec = TOOL_SPEC  # type: ignore[attr-defined]
 
+
 def get_tool():
-    """Return a properly registered Strands Tool."""
+    """Return a Strands Tool using the DATABASE_URL environment variable."""
     from strands.tools import Tool
 
     return Tool.from_function(
@@ -494,7 +689,7 @@ def get_tool():
 
 
 def run_sql_database(**kwargs):
-    """Direct usage without needing ToolUse format."""
+    """Direct usage without needing ToolUse format. Prefer StrandsSQL for new code."""
     result = sql_database(
         tool={
             "toolUseId": "direct",

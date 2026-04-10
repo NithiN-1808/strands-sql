@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "strands-sql"
-version = "0.1.8"
+version = "0.1.9"
 description = "General-purpose SQL tool for Strands agents — supports PostgreSQL, MySQL, and SQLite."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -28,6 +28,7 @@ dependencies = [
   "strands-agents>=0.1.0",
   "sqlalchemy>=2.0",
   "pydantic>=2.0",
+  "sqlglot>=20.0"
 ]
 
 [project.optional-dependencies]
